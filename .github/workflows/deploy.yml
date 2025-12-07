@@ -25,7 +25,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Quartz 4.5.2 requires Node >= 22 and npm >= 10.9.2
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
