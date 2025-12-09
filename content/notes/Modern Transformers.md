@@ -251,6 +251,56 @@ Where:
 
 ---
 
+### Step-by-step math view of MHA
+
+1. **Start from token representations**  
+   Let $x \in \mathbb{R}^{n \times d_{\text{model}}}$, where each row $x_t$ is the embedding of token $t$.
+
+2. **Per-head linear projections**  
+   For head $i$ you have:
+   - $W_i^Q \in \mathbb{R}^{d_{\text{model}} \times d_k}$  
+   - $W_i^K \in \mathbb{R}^{d_{\text{model}} \times d_k}$  
+   - $W_i^V \in \mathbb{R}^{d_{\text{model}} \times d_v}$  
+   Then:
+   $$
+   Q_i = x W_i^Q \in \mathbb{R}^{n \times d_k},\quad
+   K_i = x W_i^K \in \mathbb{R}^{n \times d_k},\quad
+   V_i = x W_i^V \in \mathbb{R}^{n \times d_v}
+   $$
+
+3. **Self-attention inside each head**  
+   For head $i$:
+   $$
+   A_i = \text{softmax}\!\left(\frac{Q_i K_i^T}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
+   $$
+   - Row $t$ of $A_i$ is the **attention distribution** of token $t$ over all tokens.  
+   - Then the output of the head is:
+   $$
+   \text{head}_i = A_i V_i \in \mathbb{R}^{n \times d_v}
+   $$
+
+4. **Concatenation and mixing heads**  
+   - Stack all heads:
+     $$
+     H = \text{Concat}(\text{head}_1, \dots, \text{head}_h) \in \mathbb{R}^{n \times (h d_v)}
+     $$
+   - Mix them back into model space:
+     $$
+     \text{MHA}(x) = H W_O,\quad W_O \in \mathbb{R}^{(h d_v) \times d_{\text{model}}}
+     $$
+
+5. **Tiny dimensional example (no numbers, just shapes)**  
+   Suppose:
+   - $d_{\text{model}} = 512$, $h = 8$ heads  
+   - Then $d_k = d_v = 64$ (so $8 \times 64 = 512$)  
+   Each token:
+   - Starts as a 512-D vector  
+   - Gets mapped to 8 different 64-D subspaces (one per head)  
+   - Each head does its own self-attention, then all 8 outputs are concatenated back to 512-D  
+   - $W_O$ mixes these 8 “views” into the next-layer representation
+
+---
+
 ### Output path (with dropout and residual)
 
 $$
@@ -342,6 +392,37 @@ Why RoPE is popular in LLMs:
 - It naturally emphasizes **relative** positions (distance between tokens) which matters more than absolute index for many tasks.
 - It works well with extrapolation tricks (e.g. extending context length by changing the rotation schedule).
 
+#### How RoPE changes the dot product (relative position math)
+
+Consider 2D for simplicity. Let $q, k \in \mathbb{R}^2$ be the **base** query/key vectors for some token content (ignoring position).  
+RoPE applies rotations depending on token positions $i, j$:
+
+$$
+\tilde{q}_i = R_{\theta_i} q,\quad \tilde{k}_j = R_{\theta_j} k
+$$
+
+Now look at their dot product:
+
+$$
+\tilde{q}_i^\top \tilde{k}_j
+= (R_{\theta_i} q)^\top (R_{\theta_j} k)
+= q^\top R_{\theta_i}^\top R_{\theta_j} k
+$$
+
+Because rotations compose and $R_{\theta_i}^\top = R_{-\theta_i}$:
+
+$$
+R_{\theta_i}^\top R_{\theta_j} = R_{\theta_j - \theta_i}
+$$
+
+So:
+
+$$
+\tilde{q}_i^\top \tilde{k}_j = q^\top R_{\theta_j - \theta_i} k
+$$
+
+**Key point:** the attention score depends on the **angle difference** $(\theta_j - \theta_i)$, i.e. the **relative position** between tokens, not just their absolute indices. In higher dimensions, RoPE applies this pairwise to many 2D subspaces, but the same idea holds.
+
 ---
 
 ## Feed-Forward Networks (FFN / MLP)
@@ -375,6 +456,42 @@ You can view the FFN as a tiny, two-layer MLP that:
 
 Attention tells each token what it should care about; the FFN lets it **think about that information in a more complex, nonlinear way**.
 
+### Step-by-step FFN computation
+
+1. **Input and dimensions**  
+   - Let $x \in \mathbb{R}^{d_{\text{model}}}$ be a **single token vector**.  
+   - Typical choice: hidden dimension $d_{\text{ff}} \approx 4 \cdot d_{\text{model}}$.
+
+2. **First linear layer (expansion)**  
+   - $W_1 \in \mathbb{R}^{d_{\text{ff}} \times d_{\text{model}}}$, $b_1 \in \mathbb{R}^{d_{\text{ff}}}$  
+   - Compute:
+     $$
+     h = W_1 x + b_1 \in \mathbb{R}^{d_{\text{ff}}}
+     $$
+   - This creates $d_{\text{ff}}$ different **features** as linear combinations of the original coordinates in $x$.
+
+3. **Nonlinearity**  
+   - Apply element-wise:
+     $$
+     u = \phi(h) \in \mathbb{R}^{d_{\text{ff}}}
+     $$
+   - $\phi$ could be GELU, Swish, or a gated variant (e.g. SwiGLU) which further **gates** components.
+
+4. **Second linear layer (compression)**  
+   - $W_2 \in \mathbb{R}^{d_{\text{model}} \times d_{\text{ff}}}$, $b_2 \in \mathbb{R}^{d_{\text{model}}}$  
+   - Compute:
+     $$
+     y = W_2 u + b_2 \in \mathbb{R}^{d_{\text{model}}}
+     $$
+   - Now you’re back in the same dimensionality as the input token, but after a **nonlinear transformation** in a higher-dimensional space.
+
+5. **Toy numeric sketch (very small dims)**  
+   - Let $d_{\text{model}} = 2$, $d_{\text{ff}} = 4$.  
+   - $x \in \mathbb{R}^2$ → multiply by $W_1$ (shape $4 \times 2$) → $h \in \mathbb{R}^4$.  
+   - Apply $\phi$ → $u \in \mathbb{R}^4$.  
+   - Multiply by $W_2$ (shape $2 \times 4$) → $y \in \mathbb{R}^2$.  
+   Even in this tiny case, you let the network build 4 intermediate features, apply a nonlinearity, then recombine them into 2 output features.
+
 ---
 
 ## Common Activations in FFNs
@@ -389,17 +506,69 @@ $$
 \text{ReLU}(z) = \max(0, z)
 $$
 
-- Simple, but zeroes out negative values → “dead neurons.”
+- **Piecewise definition (explicit):**
+  $$
+  \text{ReLU}(z) =
+  \begin{cases}
+  0, & z \le 0 \\
+  z, & z > 0
+  \end{cases}
+  $$
+- **Derivative:**
+  $$
+  \text{ReLU}'(z) =
+  \begin{cases}
+  0, & z < 0 \\
+  1, & z > 0
+  \end{cases}
+  $$
+  (undefined exactly at \(z = 0\), but set to 0 or 1 in practice).
+- **Effect:** all **negative inputs are clamped to 0** and stop contributing gradients; positive inputs pass through unchanged.
+
+Tiny numeric sketch:
+
+- \(z = -2 \Rightarrow \text{ReLU}(z) = 0\)  
+- \(z = -0.1 \Rightarrow 0\) (small negatives completely killed)  
+- \(z = 0.5 \Rightarrow 0.5\), \(z = 3 \Rightarrow 3\) (acts like identity)
 
 **GELU (Gaussian Error Linear Unit)**
+
+Definition (conceptual):
+
+$$
+\text{GELU}(z) = z \cdot \Phi(z)
+$$
+
+where \(\Phi(z)\) is the CDF of a standard normal \(\mathcal{N}(0,1)\).
+
+Smooth approximation used in practice:
 
 $$
 \text{GELU}(z) \approx 0.5z\!\left(1 + \tanh\!\left(\sqrt{\frac{2}{\pi}}(z + 0.044715z^3)\right)\right)
 $$
 
-- Smooth transition instead of a sharp cutoff.  
-- Better gradient flow.  
-- Default for models like **BERT**.
+How it works internally:
+
+- Think of \(\Phi(z)\) as a **soft gate** in \([0,1]\) that increases with \(z\):
+  - Very negative \(z\) → \(\Phi(z) \approx 0\) → output near 0  
+  - Very positive \(z\) → \(\Phi(z) \approx 1\) → output near \(z\)
+- So each component of \(z\) is scaled by **how likely a standard normal variable is to be less than \(z\)**.
+
+Derivative (using PDF \(\phi(z)\) of \(\mathcal{N}(0,1)\)):
+
+$$
+\frac{d}{dz}\text{GELU}(z)
+= \Phi(z) + z\phi(z)
+$$
+
+- \(\phi(z)\) is largest near 0 and decays for large \(|z|\), so the extra term \(z\phi(z)\) only significantly changes the gradient **around the origin**.
+- This makes GELU a **smooth “soft ReLU”**: it gradually turns on units instead of snapping from 0 to 1 like ReLU.
+
+Tiny numeric sketch (using the \(z \cdot \Phi(z)\) view, approximate):
+
+- \(z = -2\): \(\Phi(-2) \approx 0.023\) → \(\text{GELU}(z) \approx -2 \cdot 0.023 \approx -0.046\) (small negative, not fully 0)  
+- \(z = 0\): \(\Phi(0) = 0.5\) → \(\text{GELU}(0) = 0\) but derivative \(\approx 0.5\) (half-open gate)  
+- \(z = 2\): \(\Phi(2) \approx 0.977\) → \(\text{GELU}(2) \approx 1.95\) (almost identity)
 
 ---
 
@@ -409,9 +578,33 @@ $$
 \text{Swish}(z) = z \cdot \sigma(z), \quad \sigma(z) = \frac{1}{1 + e^{-z}}
 $$
 
-- Smooth and non-monotonic.
-- Keeps negative signal partially active.
-- Used in **SwiGLU**, **PaLM**, **LLaMA-2/3**, etc.
+How it works internally:
+
+- You can see Swish as **input × sigmoid gate**:
+  - \(\sigma(z)\) is in \((0,1)\) and increases with \(z\).  
+  - For each component, the network learns both **the value** (\(z\)) and **how open the gate is** (\(\sigma(z)\)).
+
+Derivative:
+
+$$
+\frac{d}{dz}\text{Swish}(z)
+= \sigma(z) + z \cdot \sigma(z)(1 - \sigma(z))
+$$
+
+- The first term \(\sigma(z)\) ensures gradients are **never identically zero** (even for negative \(z\)).  
+- The second term \(z \sigma(z)(1-\sigma(z))\) peaks around where \(\sigma(z)\) is near 0.5 (around \(z \approx 0\)), making the function **slightly non-monotonic** near zero.
+
+Shape intuition:
+
+- For **large positive** \(z\): \(\sigma(z) \to 1\) → \(\text{Swish}(z) \approx z\), derivative \(\approx 1\).  
+- For **large negative** \(z\): \(\sigma(z) \to 0\) → \(\text{Swish}(z) \approx 0\), derivative \(\approx 0\) but with a **smooth tail** (no hard corner).  
+- Around \(z \approx -1 \dots 1\): the product with \(\sigma(z)\) and its derivative creates a **bump** where slightly negative values can produce slightly higher outputs than some small positive values → this is the **non-monotonic** region that gives Swish extra expressivity.
+
+Tiny numeric sketch (approximate):
+
+- \(z = -2\): \(\sigma(-2) \approx 0.12\) → \(\text{Swish}(-2) \approx -0.24\) (not fully zeroed)  
+- \(z = 0\): \(\sigma(0) = 0.5\) → \(\text{Swish}(0) = 0\), derivative \(\approx 0.5\)  
+- \(z = 2\): \(\sigma(2) \approx 0.88\) → \(\text{Swish}(2) \approx 1.76\) (close to identity)
 
 ---
 
@@ -470,6 +663,37 @@ You can think of LayerNorm as keeping every token’s vector in a **well-behaved
 
 - Activations do not blow up or collapse as they move through dozens of blocks.
 - The optimization landscape is smoother, which helps large-batch, large-model training converge.
+
+### Step-by-step LayerNorm math
+
+Let $x \in \mathbb{R}^{d}$ be the features of a single token (e.g. $d = d_{\text{model}}$).
+
+1. **Compute mean and variance across features**
+   $$
+   \mu = \frac{1}{d} \sum_{k=1}^{d} x_k
+   $$
+   $$
+   \sigma^2 = \frac{1}{d} \sum_{k=1}^{d} (x_k - \mu)^2
+   $$
+   In practice, a small $\varepsilon$ is added inside the square root: $\sqrt{\sigma^2 + \varepsilon}$.
+
+2. **Normalize**
+   $$
+   \hat{x}_k = \frac{x_k - \mu}{\sqrt{\sigma^2 + \varepsilon}}
+   $$
+   Now $\hat{x}$ has mean $\approx 0$ and variance $\approx 1$ across its features.
+
+3. **Scale and shift (learned)**
+   $$
+   y_k = \gamma_k \hat{x}_k + \beta_k
+   $$
+   - $\gamma, \beta \in \mathbb{R}^{d}$ are learned per-feature.  
+   - The model can recover any needed scale/offset while still benefiting from **normalized pre-activations**.
+
+4. **Tiny example**
+   - Suppose $x = [2, 4, 6]$. Then $\mu = 4$, $\sigma^2 = \frac{(2-4)^2 + (4-4)^2 + (6-4)^2}{3} = \frac{8}{3}$.  
+   - Subtract mean: $[-2, 0, 2]$; divide by $\sqrt{8/3}$ to get normalized values.  
+   - If $\gamma = [1,1,1]$, $\beta = [0,0,0]$, you just have the pure normalized vector; other $\gamma,\beta$ learn useful rescalings.
 
 ---
 
@@ -551,6 +775,32 @@ $$
 
 Keeps training robust by zeroing random activations → prevents co-adaptation.
 
+### Step-by-step dropout mechanics
+
+1. **Sample mask**
+   - For each component $h_k$, sample $m_k \sim \text{Bernoulli}(1 - p)$:
+     - $m_k = 1$ with probability $1-p$ (keep)
+     - $m_k = 0$ with probability $p$ (drop)
+
+2. **Apply mask**
+   $$
+   \tilde{h}_k = m_k \cdot h_k
+   $$
+   Some components become exactly zero.
+
+3. **Scale to keep expectation constant**
+   - During training, divide by $(1-p)$:
+     $$
+     h'_k = \frac{\tilde{h}_k}{1-p}
+     $$
+   - This ensures $\mathbb{E}[h'_k] = h_k$, so at test time you can **turn dropout off** without changing the expected magnitude of activations.
+
+4. **Toy example**
+   - Let $h = [1, 2, 3]$, $p = 0.5$.  
+   - Suppose mask $m = [1, 0, 1]$ is sampled.  
+   - Then $\tilde{h} = [1, 0, 3]$, and dividing by $1-p = 0.5$ gives $h' = [2, 0, 6]$.  
+   - On a different training step you’d get a different mask → the network cannot rely on any single neuron always being present.
+
 ---
 
 ### Where dropout appears
@@ -589,21 +839,60 @@ Where:
 
 At the top → **final LayerNorm**, then project to **vocabulary logits**.
 
+### Step-by-step flow through one decoder block
+
+1. **Normalize + attend**  
+   - Take input $x$.  
+   - Apply LayerNorm: $\hat{x} = \text{LayerNorm}(x)$.  
+   - Run MHA: $a = \text{MHA}(\hat{x})$.  
+   - Apply dropout: $\tilde{a} = \text{Dropout}(a)$.  
+   - Add residual: $h_1 = x + \tilde{a}$.
+
+2. **Normalize + FFN**  
+   - Apply LayerNorm again: $\hat{h}_1 = \text{LayerNorm}(h_1)$.  
+   - Run FFN: $f = \text{FFN}(\hat{h}_1)$.  
+   - Apply dropout: $\tilde{f} = \text{Dropout}(f)$.  
+   - Add residual: $h_2 = h_1 + \tilde{f}$.
+
+3. **Stack many such blocks**  
+   - Each block refines representations **a little**, while residuals ensure information and gradients can flow through **dozens/hundreds** of layers without collapsing.
+
 ---
 
-## Putting It All Together — Full Transformer Flow
+## Putting It All Together
 
 ---
 
-1. **Tokenize** input → token IDs  
-2. Convert to **embeddings**
-3. Add or apply **positional/rotary encodings**
-4. Pass through **N decoder blocks:**
+Conceptually, a decoder-only Transformer defines a function
+
+> “Given all previous tokens, return a probability distribution over the **next** token.”
+
+You can write this as:
+
+$$
+p_\theta(t_{n+1} \mid t_{\le n}) = \text{softmax}(z_n), \quad
+z = H W_{\text{vocab}}^\top
+$$
+
+Where:
+
+- $t_1, \dots, t_n$ are token IDs  
+- $H \in \mathbb{R}^{n \times d_{\text{model}}}$ is the final hidden states matrix (one row per token)  
+- $z_n$ is the **last row** of $z$ (logits for the next token)  
+- $W_{\text{vocab}}$ is the output embedding / vocab projection
+
+Full flow end-to-end:
+
+1. **Tokenize** input → token IDs $(t_1, \dots, t_n)$  
+2. Convert to **embeddings** using a matrix $E$: $X_0 = E[t_1, \dots, t_n]$  
+3. Add or apply **positional/rotary encodings** to $X_0$  
+4. Pass through **$N$ decoder blocks:**
    - Pre-LN → MHA → residual  
-   - Pre-LN → FFN → residual
-5. Apply **final LayerNorm**
-6. Project to **vocab logits**
-7. Use **softmax** to get next-token probabilities
+   - Pre-LN → FFN → residual  
+   to get $X_N$ (same shape as $X_0$)
+5. Apply **final LayerNorm**: $H = \text{LayerNorm}(X_N)$  
+6. Project to **vocab logits**: $z = H W_{\text{vocab}}^\top$  
+7. Use **softmax** on the last position $z_n$ to get next-token probabilities
 
 ---
 
